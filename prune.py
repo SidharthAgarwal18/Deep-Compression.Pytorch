@@ -25,6 +25,7 @@ parser.add_argument('--loadfile', '-l', default="checkpoint/res18.t7",dest='load
 parser.add_argument('--prune', '-p', default=0.5, dest='prune', help='Parameters to be pruned')
 parser.add_argument('--lr', default=0.01, type=float, help='learning rate')
 parser.add_argument('--net', default='res18')
+parser.add_argument('--wmFtune',type = bool,default = False,help = "If you want to fine tune on wms")
 args = parser.parse_args()
 
 prune = float(args.prune)
@@ -116,14 +117,45 @@ net.load_state_dict(checkpoint['net'])
 criterion = nn.CrossEntropyLoss()
 optimizer = optim.SGD(net.parameters(), lr=args.lr, momentum=0.9, weight_decay=5e-4)
 
-def train(epoch):
+wminputs = []
+wmtargets = []
+
+if args.wmFtune:
+    watermark = torch.load("watermark.pth",map_location = device)
+    
+    total_dims = len(watermark["inner_img"])
+    samples_per_dim = watermark["inner_img"][0].shape[0]
+    zeros = torch.zeros(1,3,32,32).to(device)
+    
+    for dim in range(total_dims):
+        for sample in range(samples_per_dim):
+            if not torch.equal(zeros,watermark["inner_img"][dim][sample].to(device)):
+                wminputs.append((watermark["inner_img"][dim][sample]).to(device))
+                wmtargets.append(((watermark["inner_pred"][dim][sample]).to(device)).unsqueeze(0).long())
+
+            if not torch.equal(zeros,watermark["outer_img"][dim][sample].to(device)):
+                wminputs.append((watermark["outer_img"][dim][sample]).to(device))
+                wmtargets.append(((watermark["outer_pred"][dim][sample]).to(device)).unsqueeze(0).long())
+    print("\n\nTotal watermarks fine tuned on are : "+str(len(wminputs))+"\n\n")
+
+
+def train(epoch,wmFineTune = False,wminputs = [],wmtargets = []):
     print('\nEpoch: %d' % epoch)
     net.train()
     train_loss = 0
     correct = 0
     total = 0
+
+    if wmFineTune:
+        wm_idx = np.random.randint(len(wminputs))
+
     for batch_idx, (inputs, targets) in enumerate(trainloader):
         inputs, targets = inputs.to(device), targets.to(device)
+
+        if wmFineTune:
+            inputs = torch.cat([inputs, wminputs[(wm_idx + batch_idx) % len(wminputs)]], dim=0)
+            targets = torch.cat([targets, wmtargets[(wm_idx + batch_idx) % len(wmtargets)]], dim=0)
+
         optimizer.zero_grad()
         outputs = net(inputs)
         loss = criterion(outputs, targets)
@@ -184,7 +216,7 @@ def test(epoch):
 
 
 for epoch in range(start_epoch, start_epoch+20):
-    train(epoch)
+    train(epoch,args.wmFtune,wminputs,wmtargets)
     test(epoch)
     with open("prune-results-"+str(prune)+'-'+str(args.net)+".txt", "a") as f: 
         f.write(str(epoch)+"\n")
